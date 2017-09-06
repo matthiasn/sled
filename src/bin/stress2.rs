@@ -14,6 +14,8 @@ use chan_signal::Signal;
 use docopt::Docopt;
 use rand::{Rng, thread_rng};
 
+const KEY_BYTES: usize = 2;
+
 const USAGE: &'static str = "
 Usage: stress2 [--threads=<#>] [--burn-in] [--duration=<s>]
 
@@ -41,7 +43,9 @@ fn report(shutdown: Arc<AtomicBool>, total: Arc<AtomicUsize>) {
 }
 
 fn byte() -> Vec<u8> {
-    vec![thread_rng().gen::<u8>()]
+    let mut v = vec![0; KEY_BYTES];
+    thread_rng().fill_bytes(&mut v);
+    v
 }
 
 fn do_set(tree: Arc<rsdb::Tree>, shutdown: Arc<AtomicBool>, total: Arc<AtomicUsize>) {
@@ -52,11 +56,9 @@ fn do_set(tree: Arc<rsdb::Tree>, shutdown: Arc<AtomicBool>, total: Arc<AtomicUsi
 }
 
 fn do_get(tree: Arc<rsdb::Tree>, shutdown: Arc<AtomicBool>, total: Arc<AtomicUsize>) {
-    let mut k = 0;
     while !shutdown.load(Ordering::Relaxed) {
         total.fetch_add(1, Ordering::Release);
-        tree.get(&*vec![k]);
-        k = if k == 255 { 0 } else { k + 1 };
+        tree.get(&*byte());
     }
 }
 
@@ -78,15 +80,15 @@ fn do_scan(tree: Arc<rsdb::Tree>, shutdown: Arc<AtomicBool>, total: Arc<AtomicUs
     while !shutdown.load(Ordering::Relaxed) {
         total.fetch_add(1, Ordering::Release);
         tree.scan(&*byte())
-            .take(thread_rng().gen_range(1, 16))
+            .take(thread_rng().gen_range(1, 3))
             .collect::<Vec<_>>();
     }
 }
 
-fn prepopulate(tree: Arc<rsdb::Tree>, keys: usize) {
-    for i in 0..keys {
+fn prepopulate(tree: Arc<rsdb::Tree>) {
+    for i in 0..256_usize.pow(KEY_BYTES as u32) {
         let bytes: [u8; 8] = unsafe { mem::transmute(i) };
-        let k = bytes.to_vec();
+        let k = bytes[8 - KEY_BYTES..8].to_vec();
         let v = vec![];
         tree.set(k, v);
     }
@@ -124,7 +126,7 @@ fn main() {
         }};
     }
 
-    prepopulate(tree.clone(), 256);
+    prepopulate(tree.clone());
 
     let threads = vec![
         cloned!(|_, shutdown, total| report(shutdown, total)),

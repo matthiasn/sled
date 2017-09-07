@@ -155,10 +155,9 @@ impl ConfigInner {
 
             #[cfg(target_os = "linux")]
             {
+                use std::os::unix::fs::OpenOptionsExt;
                 if !self.use_os_cache {
-                    use std::os::unix::fs::OpenOptionsExt;
                     options.custom_flags(libc::O_DIRECT);
-                    panic!("O_DIRECT support not sussed out yet.");
                 }
             }
 

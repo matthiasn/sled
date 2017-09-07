@@ -15,6 +15,7 @@ default = []
 bench = ["clap", "num_cpus", "log", "rand", "rayon", "zstd", "env_logger"]
 stress = ["docopt", "chan-signal", "rayon", "rand", "zstd"]
 o_direct_writer = []
+o_direct_reader = []
 
 # [profile.release]
 # debug = 2

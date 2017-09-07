@@ -106,21 +106,25 @@ impl Log for LockFreeLog {
         let cached_f = self.config().cached_file();
         let mut f = cached_f.borrow_mut();
 
-        let seek_back = id % 512;
+        let seek_back = id as usize % 512;
         let split_header = seek_back > 512 - HEADER_LEN;
         let read_buf_len = if split_header { 512 * 2 } else { 512 };
 
-        f.seek(SeekFrom::Start(id - seek_back))?;
+        f.seek(SeekFrom::Start(id - seek_back as LogID))?;
 
         let mut read_buf = vec![0u8; read_buf_len];
         f.read_exact(&mut *read_buf)?;
 
         let valid = read_buf[seek_back] == 1;
 
-        let len_buf = &read_buf[seek_back + 1..seek_back + 5];
-        let len32: u32 = unsafe { std::mem::transmute(len_buf) };
-        let mut len = len32 as usize;
-        let crc16_buf = &read_buf[seek_back + 5..seek_back + 7];
+        let mut len = {
+            let len_buf = &read_buf[seek_back + 1..seek_back + 5];
+            let len32: u32 =
+                unsafe { std::mem::transmute([len_buf[0], len_buf[1], len_buf[2], len_buf[3]]) };
+            len32 as usize
+        };
+
+        let crc16_buf = [read_buf[seek_back + 5], read_buf[seek_back + 6]];
 
         let max = self.config().get_io_buf_size() - HEADER_LEN;
         if len > max {
@@ -128,36 +132,54 @@ impl Log for LockFreeLog {
             error!("log read invalid message length, {} should be <= {}", len, max);
             M.read.measure(clock() - start);
             return Ok(LogRead::Corrupted(len));
-        } else if len == 0 && !valid {
+        }
+
+        if !valid {
+            if len != 0 {
+                M.read.measure(clock() - start);
+                // FIXME was len + 5?
+                return Ok(LogRead::Zeroed(len));
+            }
+
             // skip to next record, which starts with 1
             loop {
-                let mut byte = [0u8; 1];
-                if let Err(e) = f.read_exact(&mut byte) {
+                for cursor in &read_buf[seek_back + HEADER_LEN..] {
+                    if *cursor == 1 {
+                        M.read.measure(clock() - start);
+                        return Ok(LogRead::Zeroed(len));
+                    }
+                    debug_assert_eq!(*cursor, 0);
+                    len += 1;
+                }
+
+                if let Err(e) = f.read_exact(&mut read_buf) {
                     if e.kind() == UnexpectedEof {
                         // we've hit the end of the file
-                        break;
+                        M.read.measure(clock() - start);
+                        return Ok(LogRead::Zeroed(len));
                     }
                     panic!("{:?}", e);
-                }
-                if byte[0] != 1 {
-                    debug_assert_eq!(byte[0], 0);
-                    len += 1;
-                } else {
-                    break;
                 }
             }
         }
 
-        if !valid {
-            M.read.measure(clock() - start);
-            return Ok(LogRead::Zeroed(len + 5));
-        }
-
         let mut buf = Vec::with_capacity(len);
-        unsafe {
-            buf.set_len(len);
+
+        // put remaining bytes (up to len) into buf
+        let data_start = seek_back + HEADER_LEN;
+        let remaining_len = read_buf.len() - (data_start);
+        let to_copy = std::cmp::min(remaining_len, len);
+
+        buf.extend_from_slice(&read_buf[data_start..data_start + to_copy]);
+
+        // iterate over blocks until buf is full
+        while len > 0 {
+            let mut read_buf = vec![0u8; 512];
+            f.read_exact(&mut read_buf)?;
+            let to_copy = std::cmp::min(512, len);
+            buf.extend_from_slice(&read_buf[0..to_copy]);
+            len -= to_copy;
         }
-        f.read_exact(&mut buf)?;
 
         let checksum = crc16_arr(&buf);
         if checksum != crc16_buf {
